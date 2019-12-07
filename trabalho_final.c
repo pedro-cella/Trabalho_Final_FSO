@@ -4,7 +4,9 @@
 #include <dirent.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <wait.h>
 
+#define PROCESS_MAX 4
 #define PATH_MAX 4096
 
 ///RESUMO DO CODIGO:
@@ -26,6 +28,8 @@
 //rm -rf => forca a remocao, recursivamente de tudo no arquivo temporario.
 
 typedef struct dirent* Diretorio;
+
+int totalProcessos = 1;
 
 // pool of consumers
 struct Pool_of_consumers{
@@ -72,55 +76,32 @@ int main(int argc, char *argv[]){
     copiarRecursivo(dir, novo);
     if(chdir(novo)) perror("erro no chdir()");
 
-//    //Chamar o shell para fazer bzip2 (apenas em arquivos) em 4 threads (recursivamente)
-    // threads
-//    bz2Recursivo(novo);
-//    if(chdir(novo)) perror("erro no chdir()");
+    for (int i = 0; i < PROCESS_MAX; i++){
+        wait(NULL);
+        totalProcessos--;
+    }
 
     //Chamar o shell para fazer o tar
     if(chdir("..")) perror("erro no chdir()");
+
     sprintf(buffer, "tar cf %s.tar %s", DESTINO, DESTINO);
-//    if(popen(buffer, "r") == NULL) perror("nao foi possivel fazer o tar do diretorio.");
-    system(buffer);
+    FILE *pf = popen(buffer, "r");
+    if(!pf){
+        perror("nao foi possivel fazer o tar do diretorio.");
+        exit(-1);
+    }
+    if (pclose(pf) != 0) perror("erro ao fechar o pipe");
+
     if(chdir(novo)) perror("erro no chdir()");
 
-
+    wait(NULL);
     //Excluir a copia A TERMINAR
-    sleep(1);
     if(removerRecursivo(novo)) perror("nao foi possivel remover o arquivo.");
-    chdir("..");
+    if(chdir("..")) perror("erro no chdir()");
     rmdir(DESTINO);
     //A TERMINAR
 
 
-    return 0;
-}
-
-
-int bz2Recursivo(char *dirAtual){
-
-
-    Diretorio *nameList; //se o d_type == 4, entao ele e um diretorio.
-    int numeroDeArquivos;
-
-    numeroDeArquivos = scandir(dirAtual, &nameList, 0, alphasort);
-    if(numeroDeArquivos < 0) perror("erro ao visualizar os arquivos.");
-    for (int i = 0; i < numeroDeArquivos; ++i) {
-//        printf("%d , %s\n", nameList[i]->d_type, nameList[i]->d_name);
-
-        if(nameList[i]->d_type == 4 && strcmp(nameList[i]->d_name, ".") && strcmp(nameList[i]->d_name, "..")) {
-            char dirAux[PATH_MAX];
-            strcpy(dirAux, dirAtual);
-            strcat(dirAux, "/");
-            strcat(dirAux, nameList[i]->d_name);
-            bz2Recursivo(dirAux);
-        }else if(strcmp(nameList[i]->d_name, ".") && strcmp(nameList[i]->d_name, "..")) {
-            char buffer[PATH_MAX];
-            chdir(dirAtual);
-            sprintf(buffer, "bzip2 %s", nameList[i]->d_name);
-            if (popen(buffer, "r") == NULL) perror("nao foi possivel fazer o bzip2 do arquivo.");
-        }
-    }
     return 0;
 }
 
@@ -150,37 +131,32 @@ int removerRecursivo(char *dirAtual){
 }
 
 int copiarArquivo(char *arquivo, char *destino){
-    FILE *fptr1, *fptr2;
+    FILE *atual, *copia;
     char novo[PATH_MAX];
 
-    // Open one file for reading
-    fptr1 = fopen(arquivo, "r");
-    if (fptr1 == NULL)
+    atual = fopen(arquivo, "r");
+    if (atual == NULL)
     {
         printf("Cannot open file %s \n", arquivo);
         return -1;
     }
 
-    fptr2 = fopen(destino, "w");
-    if (fptr2 == NULL)
+    copia = fopen(destino, "w");
+    if (copia == NULL)
     {
         printf("Cannot open file %s \n", destino);
         return -1;
     }
 
-    // Read contents from file
-    signed c;
-    c = fgetc(fptr1);
-    while (c != EOF)
-    {
-        fputc(c, fptr2);
-        c = fgetc(fptr1);
-    }
+    char buffer[PATH_MAX];
+    size_t bytes;
 
-//    printf("\nContents copied to %s\n", destino);
+    while (0 < (bytes = fread(buffer, 1, sizeof(buffer), atual)))
+        fwrite(buffer, 1, bytes, copia);
 
-    fclose(fptr1);
-    fclose(fptr2);
+
+    fclose(atual);
+    fclose(copia);
 
     return 0;
 }
@@ -203,7 +179,6 @@ int copiarRecursivo(char *dirAtual, char *novo){
         strcat(dirNovo, "/");
         strcat(dirNovo, nameList[i]->d_name);
 
-//        printf("%d %s\n", nameList[i]->d_type, dirAux);
         if(nameList[i]->d_type == 4 && strcmp(nameList[i]->d_name, ".") && strcmp(nameList[i]->d_name, "..")) { //se for diretorio
             if(mkdir(nameList[i]->d_name, 0700)) perror("erro no mkdir()");
             if(chdir(dirNovo)) perror("erro no chdir()");
@@ -211,10 +186,25 @@ int copiarRecursivo(char *dirAtual, char *novo){
             if(chdir("..")) perror("erro no chdir()");
         } else if(strcmp(nameList[i]->d_name, ".") && strcmp(nameList[i]->d_name, "..")) { //se for arquivo
             copiarArquivo(dirAux, dirNovo);
-            char buffer[PATH_MAX];
-            sprintf(buffer, "bzip2 %s", nameList[i]->d_name);
-//            if (popen(buffer, "r") == NULL) perror("nao foi possivel fazer o bzip2 do arquivo.");
-            system(buffer);
+
+            if(totalProcessos++ > PROCESS_MAX){
+                wait(NULL);
+                totalProcessos--;
+            }
+            pid_t subprocesso;
+            if((subprocesso = fork()) < 0){
+                perror("erro no fork");
+            }
+
+            if(subprocesso == 0){
+                char *cmd = "bzip2";
+                char *argv[3];
+                argv[0] = "bzip2";
+                argv[1] = nameList[i]->d_name;
+                argv[2] = NULL;
+                execvp(cmd, argv);
+                exit(-1);
+            }
         }
     }
 
